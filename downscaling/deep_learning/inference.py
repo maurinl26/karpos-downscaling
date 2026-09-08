@@ -117,9 +117,7 @@ def tiled_inference(
         x_met = F.pad(x_met, (0, pad_w, 0, pad_h), mode="replicate")
         x_dem = F.pad(x_dem, (0, pad_w, 0, pad_h), mode="replicate")
     Hp, Wp = x_met.shape[-2:]
-    _, C_out, _, _ = _infer_output_shape(
-        model, C_met, x_dem.shape[1], tile_size, device
-    )
+    _, C_out, _, _ = _infer_output_shape(model, C_met, x_dem.shape[1], tile_size, device)
 
     output = np.zeros((1, C_out, Hp, Wp), dtype=np.float32)
     weight = np.zeros((1, 1, Hp, Wp), dtype=np.float32)
@@ -229,25 +227,19 @@ class DLInferencePipeline:
                 if k.startswith("model.")
             }
         else:
-            raise ValueError(
-                "Checkpoint incompatible : model_state_dict/state_dict absent"
-            )
+            raise ValueError("Checkpoint incompatible : model_state_dict/state_dict absent")
         if not state_dict:
             raise ValueError("Checkpoint incompatible : aucun poids modèle trouvé")
         self.model.load_state_dict(state_dict)
         self.model = self.model.to(self.device)
         self.model.eval()
-        log.info(
-            f"Checkpoint chargé : {checkpoint_path} (epoch {ckpt.get('epoch', '?')})"
-        )
+        log.info(f"Checkpoint chargé : {checkpoint_path} (epoch {ckpt.get('epoch', '?')})")
 
     def _validate_stats(self) -> None:
         required = [*self.met_vars, "elevation", "slope", "aspect", "curvature"]
         missing = [v for v in required if v not in self.stats]
         if missing:
-            raise ValueError(
-                f"Statistiques de normalisation manquantes : {', '.join(missing)}"
-            )
+            raise ValueError(f"Statistiques de normalisation manquantes : {', '.join(missing)}")
         for name in required:
             values = self.stats[name]
             if len(values) != 2 or not all(math.isfinite(float(v)) for v in values):
@@ -256,9 +248,7 @@ class DLInferencePipeline:
                 raise ValueError(f"Écart-type invalide pour {name}: {values[1]!r}")
 
     @staticmethod
-    def _validate_inputs(
-        coarse_ds: xr.Dataset, dem_ds: xr.Dataset, met_vars: list[str]
-    ) -> None:
+    def _validate_inputs(coarse_ds: xr.Dataset, dem_ds: xr.Dataset, met_vars: list[str]) -> None:
         missing_met = [v for v in met_vars if v not in coarse_ds]
         if missing_met:
             raise ValueError(f"Variables météo absentes : {', '.join(missing_met)}")
@@ -269,9 +259,7 @@ class DLInferencePipeline:
         dem_shapes = {tuple(dem_ds[v].shape[-2:]) for v in dem_vars}
         shape = next(iter(dem_shapes), (0, 0))
         if len(dem_shapes) != 1 or shape[0] < 1 or shape[1] < 1:
-            raise ValueError(
-                "Les variables MNT doivent partager une grille 2D non vide"
-            )
+            raise ValueError("Les variables MNT doivent partager une grille 2D non vide")
 
     def run(
         self,
@@ -339,9 +327,7 @@ class DLInferencePipeline:
                 device=self.device,
             ).numpy()
             if pred.shape[1] != C_out:
-                raise ValueError(
-                    f"Le modèle produit {pred.shape[1]} canaux, {C_out} attendus"
-                )
+                raise ValueError(f"Le modèle produit {pred.shape[1]} canaux, {C_out} attendus")
             results[t] = pred[0]
 
         # Dénormalisation
@@ -376,9 +362,7 @@ class DLInferencePipeline:
 
         ds_out = xr.Dataset(data_vars)
         ds_out.attrs["downscaling_method"] = "deep_learning (DEM-conditioned U-Net)"
-        ds_out.attrs["model_checkpoint"] = str(
-            self.checkpoint_path
-        )
+        ds_out.attrs["model_checkpoint"] = str(self.checkpoint_path)
         ds_out.attrs["model_checkpoint_sha256"] = _sha256_file(self.checkpoint_path)
         ds_out.attrs["normalization_stats"] = self.stats_path
         ds_out.attrs["normalization_stats_sha256"] = _sha256_file(self.stats_path)
@@ -391,9 +375,7 @@ class DLInferencePipeline:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Inférence du modèle DL de descente d'échelle"
-    )
+    p = argparse.ArgumentParser(description="Inférence du modèle DL de descente d'échelle")
     p.add_argument(
         "--override",
         nargs="*",

@@ -61,9 +61,6 @@ jobs:
       # diff de format à chaque PR + pre-commit ne sert plus à grand-chose
       # si la CI accepte du code non-formatté.
       - name: Ruff format (check only)
-        run: uv run ruff format --diff downscaling/deep_learning/inference.py tests/test_dl_smoke.py || true
-
-      - name: Ruff format gate
         run: uv run ruff format --check downscaling tests
 
       # mypy bloquant sur le scaffold validation/ (typage propre depuis le

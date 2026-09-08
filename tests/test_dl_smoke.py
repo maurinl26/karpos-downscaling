@@ -55,13 +55,8 @@ def test_cpu_train_checkpoint_inference(tmp_path) -> None:
     checkpoint = trainer.checkpoint_callback.best_model_path
     assert checkpoint
 
-    stats = {
-        name: [0.0, 1.0]
-        for name in ("t2m", "tp", "u10", "v10", "sp")
-    }
-    stats.update(
-        {name: [0.0, 1.0] for name in ("elevation", "slope", "aspect", "curvature")}
-    )
+    stats = {name: [0.0, 1.0] for name in ("t2m", "tp", "u10", "v10", "sp")}
+    stats.update({name: [0.0, 1.0] for name in ("elevation", "slope", "aspect", "curvature")})
     stats_path = tmp_path / "stats.json"
     stats_path.write_text(json.dumps(stats))
     cfg = {
