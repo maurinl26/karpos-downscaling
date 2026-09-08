@@ -79,13 +79,9 @@ def load_validated_artifact(
     except json.JSONDecodeError as exc:
         raise ValueError(f"Manifest JSON invalide : {manifest_file}") from exc
     if manifest.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError(
-            f"Version de manifest incompatible : {manifest.get('schema_version')!r}"
-        )
+        raise ValueError(f"Version de manifest incompatible : {manifest.get('schema_version')!r}")
     if expected_type and manifest.get("artifact_type") != expected_type:
-        raise ValueError(
-            f"Type d'artefact inattendu : {manifest.get('artifact_type')!r}"
-        )
+        raise ValueError(f"Type d'artefact inattendu : {manifest.get('artifact_type')!r}")
     expected_sha = manifest.get("artifact_sha256")
     actual_sha = sha256_file(artifact)
     if not expected_sha or expected_sha != actual_sha:
