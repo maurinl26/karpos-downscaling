@@ -55,8 +55,13 @@ def test_cpu_train_checkpoint_inference(tmp_path) -> None:
     checkpoint = trainer.checkpoint_callback.best_model_path
     assert checkpoint
 
-    stats = {name: [0.0, 1.0] for name in ("t2m", "tp", "u10", "v10", "sp")}
-    stats.update({name: [0.0, 1.0] for name in ("elevation", "slope", "aspect", "curvature")})
+    stats = {
+        name: [0.0, 1.0]
+        for name in ("t2m", "tp", "u10", "v10", "sp")
+    }
+    stats.update(
+        {name: [0.0, 1.0] for name in ("elevation", "slope", "aspect", "curvature")}
+    )
     stats_path = tmp_path / "stats.json"
     stats_path.write_text(json.dumps(stats))
     cfg = {
@@ -74,11 +79,18 @@ def test_cpu_train_checkpoint_inference(tmp_path) -> None:
     pipeline = DLInferencePipeline(checkpoint, cfg, stats_path, device="cpu")
     rng = np.random.default_rng(8)
     coarse = xr.Dataset(
-        {name: (("time", "y", "x"), rng.normal(size=(1, 17, 19))) for name in stats if name in pipeline.met_vars},
+        {
+            name: (("time", "y", "x"), rng.normal(size=(1, 17, 19)))
+            for name in stats
+            if name in pipeline.met_vars
+        },
         coords={"time": [0]},
     )
     dem = xr.Dataset(
-        {name: (("y", "x"), rng.normal(size=(17, 19))) for name in ("elevation", "slope", "aspect", "curvature")}
+        {
+            name: (("y", "x"), rng.normal(size=(17, 19)))
+            for name in ("elevation", "slope", "aspect", "curvature")
+        }
     )
     output = pipeline.run(coarse, dem)
     assert output.sizes == {"time": 1, "y": 17, "x": 19}
