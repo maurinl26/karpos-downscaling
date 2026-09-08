@@ -20,8 +20,10 @@ Usage CLI
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +42,15 @@ from .model import build_model
 log = logging.getLogger(__name__)
 
 
+def _sha256_file(path: str | Path) -> str:
+    """Hash a local inference artefact for output lineage."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Inférence par tuiles avec recombinaison Hann
 # ---------------------------------------------------------------------------
@@ -49,6 +60,17 @@ def hann_window_2d(size: int) -> np.ndarray:
     """Fenêtre de Hann 2D pour la recombinaison sans artefacts."""
     w1d = np.hanning(size).astype(np.float32)
     return np.outer(w1d, w1d)
+
+
+def _tile_starts(length: int, tile_size: int, stride: int) -> list[int]:
+    """Return starts that cover the complete axis, including the last edge."""
+    if length <= tile_size:
+        return [0]
+    starts = list(range(0, length - tile_size + 1, stride))
+    last = length - tile_size
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
 
 
 def tiled_inference(
@@ -77,18 +99,38 @@ def tiled_inference(
     -------
     torch.Tensor (1, C_out, H, W) — reconstruction complète.
     """
-    _, C_met, H, W = x_met.shape
-    _, C_out, _, _ = _infer_output_shape(model, C_met, tile_size, device)
+    if x_met.ndim != 4 or x_dem.ndim != 4 or x_met.shape[0] != 1 or x_dem.shape[0] != 1:
+        raise ValueError("tiled_inference attend deux tenseurs de forme (1, C, H, W)")
+    if x_met.shape[-2:] != x_dem.shape[-2:]:
+        raise ValueError("Les grilles météo et MNT doivent avoir la même forme")
+    if tile_size <= 0:
+        raise ValueError("tile_size doit être strictement positif")
+    if not 0 <= overlap < tile_size:
+        raise ValueError("overlap doit être compris entre 0 et tile_size exclus")
 
-    output = np.zeros((1, C_out, H, W), dtype=np.float32)
-    weight = np.zeros((1, 1, H, W), dtype=np.float32)
-    win = hann_window_2d(tile_size)[np.newaxis, np.newaxis, :, :]  # (1, 1, T, T)
+    _, C_met, H, W = x_met.shape
+    pad_h = max(0, tile_size - H)
+    pad_w = max(0, tile_size - W)
+    if pad_h or pad_w:
+        import torch.nn.functional as F
+
+        x_met = F.pad(x_met, (0, pad_w, 0, pad_h), mode="replicate")
+        x_dem = F.pad(x_dem, (0, pad_w, 0, pad_h), mode="replicate")
+    Hp, Wp = x_met.shape[-2:]
+    _, C_out, _, _ = _infer_output_shape(model, C_met, x_dem.shape[1], tile_size, device)
+
+    output = np.zeros((1, C_out, Hp, Wp), dtype=np.float32)
+    weight = np.zeros((1, 1, Hp, Wp), dtype=np.float32)
+    # Hann vaut zéro sur le bord ; un epsilon garantit une couverture non nulle
+    # lorsque le domaine ne contient qu'une seule tuile.
+    win = np.maximum(hann_window_2d(tile_size), np.finfo(np.float32).eps)
+    win = win[np.newaxis, np.newaxis, :, :]  # (1, 1, T, T)
 
     stride = tile_size - overlap
     model.eval()
-    with torch.no_grad():
-        for i0 in range(0, H - tile_size + 1, stride):
-            for j0 in range(0, W - tile_size + 1, stride):
+    with torch.inference_mode():
+        for i0 in _tile_starts(Hp, tile_size, stride):
+            for j0 in _tile_starts(Wp, tile_size, stride):
                 i1, j1 = i0 + tile_size, j0 + tile_size
                 tile_met = x_met[:, :, i0:i1, j0:j1].to(device)
                 tile_dem = x_dem[:, :, i0:i1, j0:j1].to(device)
@@ -97,23 +139,20 @@ def tiled_inference(
                 weight[:, :, i0:i1, j0:j1] += win
 
     # Normalise par le poids
-    output /= np.where(weight > 0, weight, 1.0)
-    return torch.from_numpy(output)
+    if np.any(weight <= 0):  # defensive assertion against future tiling changes
+        raise RuntimeError("Le tuilage n'a pas couvert toute la grille")
+    output /= weight
+    return torch.from_numpy(output[:, :, :H, :W])
 
 
 def _infer_output_shape(
-    model: torch.nn.Module, c_in: int, tile_size: int, device: torch.device
+    model: torch.nn.Module, c_in: int, dem_in: int, tile_size: int, device: torch.device
 ) -> tuple:
     """Infère le nombre de canaux de sortie en faisant passer un batch factice."""
     model.eval()
     with torch.no_grad():
         x = torch.zeros(1, c_in, tile_size, tile_size, device=device)
-        dem_ch = next((m for m in model.modules() if hasattr(m, "encoders")), None)
-        if dem_ch is not None:
-            d_in = dem_ch.encoders[0][0].block[0].in_channels
-        else:
-            d_in = 4
-        d = torch.zeros(1, d_in, tile_size, tile_size, device=device)
+        d = torch.zeros(1, dem_in, tile_size, tile_size, device=device)
         out = model(x, d)
     return out.shape
 
@@ -160,11 +199,14 @@ class DLInferencePipeline:
             else:
                 device = "cpu"
         self.device = torch.device(device)
+        self.checkpoint_path = str(checkpoint_path)
+        self.stats_path = str(stats_path)
 
         # Statistiques de normalisation
-        with open(stats_path) as f:
+        with open(stats_path, encoding="utf-8") as f:
             raw = json.load(f)
         self.stats = {k: tuple(v) for k, v in raw.items()}
+        self._validate_stats()
 
         # Modèle
         self.model = build_model(
@@ -176,10 +218,48 @@ class DLInferencePipeline:
             use_film=dl_cfg.get("use_film", True),
         )
         ckpt = torch.load(checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model_state_dict"])
+        if "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+        elif "state_dict" in ckpt:
+            state_dict = {
+                k.removeprefix("model."): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.")
+            }
+        else:
+            raise ValueError("Checkpoint incompatible : model_state_dict/state_dict absent")
+        if not state_dict:
+            raise ValueError("Checkpoint incompatible : aucun poids modèle trouvé")
+        self.model.load_state_dict(state_dict)
         self.model = self.model.to(self.device)
         self.model.eval()
         log.info(f"Checkpoint chargé : {checkpoint_path} (epoch {ckpt.get('epoch', '?')})")
+
+    def _validate_stats(self) -> None:
+        required = [*self.met_vars, "elevation", "slope", "aspect", "curvature"]
+        missing = [v for v in required if v not in self.stats]
+        if missing:
+            raise ValueError(f"Statistiques de normalisation manquantes : {', '.join(missing)}")
+        for name in required:
+            values = self.stats[name]
+            if len(values) != 2 or not all(math.isfinite(float(v)) for v in values):
+                raise ValueError(f"Statistiques invalides pour {name}: {values!r}")
+            if float(values[1]) <= 0:
+                raise ValueError(f"Écart-type invalide pour {name}: {values[1]!r}")
+
+    @staticmethod
+    def _validate_inputs(coarse_ds: xr.Dataset, dem_ds: xr.Dataset, met_vars: list[str]) -> None:
+        missing_met = [v for v in met_vars if v not in coarse_ds]
+        if missing_met:
+            raise ValueError(f"Variables météo absentes : {', '.join(missing_met)}")
+        dem_vars = ("elevation", "slope", "aspect", "curvature")
+        missing_dem = [v for v in dem_vars if v not in dem_ds]
+        if missing_dem:
+            raise ValueError(f"Variables MNT absentes : {', '.join(missing_dem)}")
+        dem_shapes = {tuple(dem_ds[v].shape[-2:]) for v in dem_vars}
+        shape = next(iter(dem_shapes), (0, 0))
+        if len(dem_shapes) != 1 or shape[0] < 1 or shape[1] < 1:
+            raise ValueError("Les variables MNT doivent partager une grille 2D non vide")
 
     def run(
         self,
@@ -205,6 +285,11 @@ class DLInferencePipeline:
         xr.Dataset haute résolution.
         """
         output_vars = output_vars or self.met_vars
+        unknown_outputs = set(output_vars) - set(self.met_vars)
+        if unknown_outputs:
+            names = ", ".join(sorted(unknown_outputs))
+            raise ValueError(f"Variables de sortie inconnues : {names}")
+        self._validate_inputs(coarse_ds, dem_ds, self.met_vars)
         n_times = len(coarse_ds.time) if "time" in coarse_ds.dims else 1
 
         # Prépare le tenseur DEM une seule fois (constant dans le temps)
@@ -223,18 +308,18 @@ class DLInferencePipeline:
             x_met, _ = prepare_inference_batch(
                 coarse_ds, dem_ds, self.met_vars, self.stats, time_idx=t, device=str(self.device)
             )
-            if self.tile_size >= H and self.tile_size >= W:
-                with torch.no_grad():
-                    pred = self.model(x_met, x_dem).cpu().numpy()
-            else:
-                pred = tiled_inference(
-                    self.model,
-                    x_met,
-                    x_dem,
-                    tile_size=self.tile_size,
-                    overlap=self.overlap,
-                    device=self.device,
-                ).numpy()
+            pred = tiled_inference(
+                self.model,
+                x_met,
+                x_dem,
+                tile_size=self.tile_size,
+                overlap=self.overlap,
+                device=self.device,
+            ).numpy()
+            if pred.shape[1] != C_out:
+                raise ValueError(
+                    f"Le modèle produit {pred.shape[1]} canaux, {C_out} attendus"
+                )
             results[t] = pred[0]
 
         # Dénormalisation
@@ -270,8 +355,11 @@ class DLInferencePipeline:
         ds_out = xr.Dataset(data_vars)
         ds_out.attrs["downscaling_method"] = "deep_learning (DEM-conditioned U-Net)"
         ds_out.attrs["model_checkpoint"] = str(
-            self.checkpoint_path if hasattr(self, "checkpoint_path") else ""
+            self.checkpoint_path
         )
+        ds_out.attrs["model_checkpoint_sha256"] = _sha256_file(self.checkpoint_path)
+        ds_out.attrs["normalization_stats"] = self.stats_path
+        ds_out.attrs["normalization_stats_sha256"] = _sha256_file(self.stats_path)
         return ds_out
 
 
