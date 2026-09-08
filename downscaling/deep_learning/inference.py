@@ -258,7 +258,7 @@ class DLInferencePipeline:
             raise ValueError(f"Variables MNT absentes : {', '.join(missing_dem)}")
         dem_shapes = {tuple(dem_ds[v].shape[-2:]) for v in dem_vars}
         shape = next(iter(dem_shapes), (0, 0))
-        if len(dem_shapes) != 1 or shape[0] < 1 or shape[1] < 1:
+        if len(dem_shapes) != 1 or len(shape) != 2 or shape[0] < 1 or shape[1] < 1:
             raise ValueError("Les variables MNT doivent partager une grille 2D non vide")
 
     def run(
