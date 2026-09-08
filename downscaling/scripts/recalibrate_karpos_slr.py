@@ -71,6 +71,7 @@ from downscaling.prtihvi_wxc.sencrop import (
     load_stations_catalog,
     load_timeseries,
 )
+from downscaling.utils.artifacts import load_validated_artifact
 from downscaling.utils.io import describe, is_remote, make_zarr_store, write_sidecar
 
 log = logging.getLogger("recalibrate_karpos_slr")
@@ -394,16 +395,23 @@ def main() -> int:
 
     qdm = None
     if args.qdm_joblib is not None:
-        import joblib
-
         qdm_local = _resolve_to_local(args.qdm_joblib, label="qdm")
+        qdm_meta_uri = str(args.qdm_joblib).replace(".joblib", ".metadata.json")
+        qdm_meta_local = _resolve_to_local(qdm_meta_uri, label="qdm_metadata")
         if not qdm_local.exists():
             log.error("--qdm-joblib %s introuvable", args.qdm_joblib)
             return 2
-        qdm = joblib.load(qdm_local)
+        try:
+            qdm, qdm_manifest = load_validated_artifact(
+                qdm_local, expected_type="qdm", metadata_file=qdm_meta_local
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            log.error("Artefact QDM refusé : %s", exc)
+            return 2
         log.info(
-            "QDM chargée depuis %s (n_quantiles=%d, by_month=%s)",
+            "QDM chargée depuis %s (sha256=%s, n_quantiles=%d, by_month=%s)",
             args.qdm_joblib,
+            qdm_manifest["artifact_sha256"][:12],
             qdm.n_quantiles,
             qdm.by_month,
         )

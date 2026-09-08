@@ -35,6 +35,7 @@ import pandas as pd
 import xarray as xr
 
 from downscaling.karpos_slr.quantile_mapping import QuantileDeltaMapping
+from downscaling.utils.artifacts import write_artifact_metadata
 
 DEF_SENC = "/Users/loicmaurin/kDrive/karpos_datasets/data/raw/sencrop"
 DEF_AR = "/Users/loicmaurin/kDrive/karpos_datasets/output/arome_openmeteo_backfill/arome_hd_stations_2023-2025.parquet"
@@ -110,6 +111,13 @@ def main() -> None:
     except Exception:
         sha = None
     meta = {
+        "artifact_type": "qdm",
+        "fit_protocol": {
+            "kind": qdm.kind,
+            "by_month": qdm.by_month,
+            "n_quantiles": qdm.n_quantiles,
+            "wet_threshold": qdm.wet_threshold,
+        },
         "issue": "maurinl26/karpos-downscaling#105",
         "source_version": "v1-arome-native",
         "kind": "delta",
@@ -125,7 +133,7 @@ def main() -> None:
         "git_sha": sha,
         "command": "uv run python -m downscaling.scripts.calibrate_qdm_arome_native",
     }
-    Path(str(a.out).replace(".joblib", ".metadata.json")).write_text(json.dumps(meta, indent=2))
+    write_artifact_metadata(a.out, meta)
     print(
         f"wrote {a.out} · months={meta['months_calibrated']} · sanity Feb {meta['sanity_transform_feb']}"
     )
