@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from downscaling.utils.registry import (
@@ -9,7 +12,6 @@ from downscaling.utils.registry import (
     resolve_artifact,
     resolve_production,
 )
-from downscaling.utils.artifacts import write_artifact_metadata
 
 
 def test_registry_is_content_addressed_and_requires_approval(tmp_path):
@@ -85,12 +87,9 @@ def test_joblib_loader_requires_production_and_matching_sidecar(tmp_path):
     joblib = pytest.importorskip("joblib")
     source = tmp_path / "qdm.joblib"
     joblib.dump(FakeCalibrator(), source)
-    write_artifact_metadata(
-        source,
-        {
-            "artifact_type": "qdm",
-            "fit_protocol": {"kind": "delta", "by_month": True, "n_quantiles": 10},
-        },
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    source.with_suffix(".metadata.json").write_text(
+        json.dumps({"artifact_type": "qdm", "artifact_sha256": digest})
     )
     root = tmp_path / "registry"
     manifest = register_artifact(source, root, artifact_type="qdm")

@@ -11,11 +11,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from hashlib import sha256
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-
-from .artifacts import load_validated_artifact, sha256_file
 
 ArtifactStatus = Literal["candidate", "validated", "production", "retired"]
 _STATUSES: tuple[ArtifactStatus, ...] = (
@@ -30,6 +29,14 @@ _TRANSITIONS: dict[ArtifactStatus, frozenset[ArtifactStatus]] = {
     "production": frozenset({"retired"}),
     "retired": frozenset(),
 }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _manifest_path(root: Path, digest: str) -> Path:
@@ -67,7 +74,7 @@ def register_artifact(
     if not artifact_type:
         raise ValueError("artifact_type est obligatoire")
     registry = Path(root)
-    digest = sha256_file(source)
+    digest = _sha256_file(source)
     manifest_file = _manifest_path(registry, digest)
     object_file = _artifact_path(registry, digest, source.name)
     manifest: dict[str, Any] = {
@@ -87,7 +94,7 @@ def register_artifact(
         existing = json.loads(manifest_file.read_text())
         if existing.get("digest") != digest or existing.get("artifact_type") != artifact_type:
             raise ValueError(f"Collision de digest dans le registre : {digest}")
-        if not object_file.is_file() or sha256_file(object_file) != digest:
+        if not object_file.is_file() or _sha256_file(object_file) != digest:
             raise ValueError(f"Objet du registre absent ou corrompu : {digest}")
         return existing
     object_file.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +102,7 @@ def register_artifact(
     source_sidecar = source.with_suffix(".metadata.json")
     if source_sidecar.is_file():
         shutil.copyfile(source_sidecar, object_file.with_suffix(".metadata.json"))
-    if sha256_file(object_file) != digest:
+    if _sha256_file(object_file) != digest:
         object_file.unlink(missing_ok=True)
         raise ValueError("Echec de vérification du checksum lors de l'enregistrement")
     _write_json(manifest_file, manifest)
@@ -168,7 +175,7 @@ def resolve_artifact(
     if expected_output_schema and manifest.get("output_schema") != expected_output_schema:
         raise ValueError("Schéma de sortie incompatible")
     artifact = _artifact_path(registry, digest, manifest["artifact_filename"])
-    if not artifact.is_file() or sha256_file(artifact) != digest:
+    if not artifact.is_file() or _sha256_file(artifact) != digest:
         raise ValueError(f"Objet du registre absent ou corrompu : {digest}")
     return artifact, manifest
 
@@ -202,7 +209,14 @@ def load_registered_artifact(
 ) -> tuple[Any, dict[str, Any]]:
     """Load a registered joblib artefact after registry and checksum checks."""
     artifact, manifest = resolve_production(root, digest, expected_type=expected_type)
-    obj, sidecar = load_validated_artifact(artifact, expected_type=expected_type)
-    if sidecar.get("artifact_sha256") != digest:
-        raise ValueError("Le sidecar de l'artefact ne correspond pas au digest du registre")
+    import joblib
+
+    sidecar_path = artifact.with_suffix(".metadata.json")
+    if sidecar_path.is_file():
+        sidecar = json.loads(sidecar_path.read_text())
+        if sidecar.get("artifact_sha256") != digest:
+            raise ValueError("Le sidecar de l'artefact ne correspond pas au digest du registre")
+        if expected_type and sidecar.get("artifact_type") != expected_type:
+            raise ValueError("Type d'artefact incompatible dans le sidecar")
+    obj = joblib.load(artifact)
     return obj, manifest
