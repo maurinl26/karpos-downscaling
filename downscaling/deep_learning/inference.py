@@ -252,11 +252,13 @@ class DLInferencePipeline:
         missing_met = [v for v in met_vars if v not in coarse_ds]
         if missing_met:
             raise ValueError(f"Variables météo absentes : {', '.join(missing_met)}")
-        missing_dem = [v for v in ("elevation", "slope", "aspect", "curvature") if v not in dem_ds]
+        dem_vars = ("elevation", "slope", "aspect", "curvature")
+        missing_dem = [v for v in dem_vars if v not in dem_ds]
         if missing_dem:
             raise ValueError(f"Variables MNT absentes : {', '.join(missing_dem)}")
-        dem_shapes = {tuple(dem_ds[v].shape[-2:]) for v in ("elevation", "slope", "aspect", "curvature")}
-        if len(dem_shapes) != 1 or next(iter(dem_shapes))[0] < 1 or next(iter(dem_shapes))[1] < 1:
+        dem_shapes = {tuple(dem_ds[v].shape[-2:]) for v in dem_vars}
+        shape = next(iter(dem_shapes), (0, 0))
+        if len(dem_shapes) != 1 or shape[0] < 1 or shape[1] < 1:
             raise ValueError("Les variables MNT doivent partager une grille 2D non vide")
 
     def run(
@@ -285,7 +287,8 @@ class DLInferencePipeline:
         output_vars = output_vars or self.met_vars
         unknown_outputs = set(output_vars) - set(self.met_vars)
         if unknown_outputs:
-            raise ValueError(f"Variables de sortie inconnues : {', '.join(sorted(unknown_outputs))}")
+            names = ", ".join(sorted(unknown_outputs))
+            raise ValueError(f"Variables de sortie inconnues : {names}")
         self._validate_inputs(coarse_ds, dem_ds, self.met_vars)
         n_times = len(coarse_ds.time) if "time" in coarse_ds.dims else 1
 
