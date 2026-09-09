@@ -73,6 +73,25 @@ jobs:
       - name: mypy (informatif partout)
         run: uv run mypy downscaling || true
 
+  dl-smoke:
+    name: DL CPU smoke (train → inference)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync deep-learning dependencies
+        run: uv sync --extra dl
+
+      - name: Run train/checkpoint/inference smoke
+        run: uv run pytest tests/test_dl_smoke.py -q
+
   docs-build:
     # Vérifie que la doc Sphinx compile sans erreur sur chaque PR.
     # Évite les régressions silencieuses qui ne se découvriraient qu'au
