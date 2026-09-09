@@ -38,7 +38,6 @@ Notes
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import subprocess
@@ -54,6 +53,7 @@ import xarray as xr
 from downscaling.karpos_slr.pipeline import KarposSLRPipeline
 from downscaling.karpos_slr.quantile_mapping import QuantileDeltaMapping
 from downscaling.prtihvi_wxc.sencrop import load_stations_catalog, load_timeseries
+from downscaling.utils.artifacts import write_artifact_metadata
 
 log = logging.getLogger("calibrate_qdm")
 
@@ -407,6 +407,13 @@ def main() -> int:
     log.info("QDM sauvegardée : %s", args.out)
 
     metadata = {
+        "artifact_type": "qdm",
+        "fit_protocol": {
+            "kind": qdm.kind,
+            "by_month": qdm.by_month,
+            "n_quantiles": qdm.n_quantiles,
+            "wet_threshold": qdm.wet_threshold,
+        },
         "command": "uv run " + " ".join(sys.argv),
         "git_sha": git_sha,
         "years": args.years,
@@ -420,8 +427,7 @@ def main() -> int:
         "sencrop_root": str(args.sencrop),
         "per_month_n": {int(m): int((df["date"].dt.month == m).sum()) for m in range(1, 13)},
     }
-    meta_path = args.out.with_suffix(".metadata.json")
-    meta_path.write_text(json.dumps(metadata, indent=2))
+    meta_path = write_artifact_metadata(args.out, metadata)
     log.info("Metadata : %s", meta_path)
 
     # 7. Push métriques + joblib en artifact vers W&B (no-op si run is None)
