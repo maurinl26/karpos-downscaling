@@ -11,7 +11,7 @@ EQM — Empirical Quantile Mapping
 QDM — Quantile Delta Mapping  (Cannon et al. 2015)
     Préserve les variations relatives (précipitations) ou absolues (température)
     autour du quantile climatologique. Recommandé pour les projections climatiques
-    et la correction de réanalyses avec dérive temporelle.
+    sur une fenêtre simulée complète ; pas pour une émission météo.
 
 Usage typique
 -------------
@@ -28,6 +28,8 @@ Usage typique
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import xarray as xr
 from scipy.interpolate import interp1d
@@ -37,7 +39,9 @@ class EmpiricalQuantileMapping:
     """
     Empirical Quantile Mapping (EQM).
 
-    La correction est apprise séparément pour chaque mois calendaire afin
+    QM météo : calibration modèle/observations contemporaines, sans delta
+    climatique ni distribution future. La correction est apprise séparément
+    pour chaque mois calendaire afin
     de conserver le cycle saisonnier.
 
     Parameters
@@ -134,15 +138,22 @@ class QuantileDeltaMapping:
     """
     Quantile Delta Mapping (QDM — Cannon et al. 2015).
 
-    Décompose le signal en :
-        - un biais climatologique (corrigé par EQM sur la période de référence)
-        - une anomalie (delta) préservée telle quelle
+    Climat uniquement : fit(mod_ref, obs_ref), puis transform(mod_future) sur
+    une fenêtre simulée représentative entière (jamais une émission météo).
+    Au rang p = F_mod_future(x), applique obs_ref_ppf(p) + x - mod_ref_ppf(p)
+    ou obs_ref_ppf(p) * x / mod_ref_ppf(p). Aucune observation future requise.
 
-    Pour les précipitations (kind='ratio') :
-        x_corr = F_obs_ref⁻¹(F_mod_ref(x_fut)) × (x_fut / F_mod_ref⁻¹(F_mod_ref(x_fut)))
+    Les distributions sont regroupées par mois calendaire via time.dt.month
+    (calendriers xarray, sans appariement des dates) et toutes les dimensions
+    spatiales sont mises en commun : sélectionner un site avant le fit local.
+    Quantiles linéaires incluant 0 et 1 ; rang moyen des ex æquo. Les queues
+    utilisent la correction au quantile extrême, sans extrapoler les PPF.
+    Les groupes climatiques non calibrés lèvent une erreur.
 
-    Pour la température (kind='delta') :
-        x_corr = F_obs_ref⁻¹(F_mod_ref(x_fut)) + (x_fut − F_mod_ref⁻¹(F_mod_ref(x_fut)))
+    En mode ratio, les CDF sont conditionnelles aux jours humides (> seuil) ;
+    les jours secs restent nuls. Le ratio est préservé sur les quantiles humides,
+    pas la fréquence humide : aucun ajustement stochastique d'occurrence.
+    Utiliser WeatherQuantileMapping pour la calibration opérationnelle QM.
 
     Parameters
     ----------
@@ -167,6 +178,11 @@ class QuantileDeltaMapping:
     ):
         if kind not in ("delta", "ratio"):
             raise ValueError("kind doit être 'delta' ou 'ratio'.")
+        if not isinstance(n_quantiles, int) or n_quantiles < 2:
+            raise ValueError("n_quantiles doit être un entier >= 2.")
+        if not np.isfinite(wet_threshold) or wet_threshold <= 0:
+            raise ValueError("wet_threshold doit être positif et fini.")
+        self._climate_version = 1
         self.kind = kind
         self.n_quantiles = n_quantiles
         self.by_month = by_month
@@ -189,6 +205,10 @@ class QuantileDeltaMapping:
         observed_ref:
             Référence haute résolution (CERRA fine, SAFRAN…) — même période.
         """
+        self._climate_version = 1
+        self._mod_cdf.clear()
+        self._mod_ppf.clear()
+        self._obs_ppf.clear()
         months = list(range(1, 13)) if self.by_month else [0]
         quantiles = np.linspace(0, 100, self.n_quantiles + 1)
         q01 = quantiles / 100.0  # [0, 1]
@@ -208,7 +228,7 @@ class QuantileDeltaMapping:
             mask_m = np.isfinite(mod_vals)
             mask_o = np.isfinite(obs_vals)
             # Skip months sans données suffisantes (campagne Sencrop limitée Fév-Mai
-            # par exemple) — transform() retombera sur l'identité pour ces mois.
+            # par exemple) — identité météo, erreur explicite en chemin climat.
             if mask_m.sum() < 10 or mask_o.sum() < 10:
                 continue
             mod_q = np.percentile(mod_vals[mask_m], quantiles)
@@ -229,13 +249,62 @@ class QuantileDeltaMapping:
         return self
 
     def transform(self, modeled_future: xr.DataArray) -> xr.DataArray:
+        """Correct an entire simulated climate window using its own empirical CDF.
+
+        Output keeps coordinates, shape and attributes; nonfinite inputs become
+        NaN. At least two finite (wet for ratio) samples per active group are
+        required. Changing the window changes the ranks and thus the correction.
+        Legacy joblib objects retain their historical weather mapping with a
+        warning; refit to explicitly opt into climate QDM.
         """
-        Applique QDM.
+        if not hasattr(self, "_climate_version"):
+            warnings.warn(
+                "Legacy QDM artifact: using weather QM; refit for climate QDM.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return self._transform_weather(modeled_future)
+        if not self._mod_ppf:
+            raise RuntimeError("Appeler fit() avant transform().")
+        result = modeled_future.astype(float).copy(deep=True)
+        months = np.unique(modeled_future.time.dt.month) if self.by_month else [0]
+        for m in months:
+            if m not in self._mod_ppf:
+                raise ValueError(
+                    f"Climate group {m} has insufficient reference samples (minimum 10)."
+                )
+            idx = slice(None) if m == 0 else modeled_future.time.dt.month == m
+            block = modeled_future.sel(time=idx).values
+            valid = np.isfinite(block)
+            wet = valid & (block > self.wet_threshold) if self.kind == "ratio" else valid
+            corrected = np.full(block.shape, np.nan)
+            if self.kind == "ratio":
+                corrected[valid & ~wet] = 0.0
+            if wet.any():
+                values = np.sort(block[wet])
+                if values.size < 2:
+                    raise ValueError("Climate window needs at least two finite (wet) samples.")
+                unique, first, counts = np.unique(values, return_index=True, return_counts=True)
+                ranks = (first + (counts - 1) / 2) / (values.size - 1)
+                tau = np.interp(block[wet], unique, ranks)
+                obs = self._obs_ppf[m](tau)
+                hist = self._mod_ppf[m](tau)
+                corrected[wet] = (
+                    obs + block[wet] - hist if self.kind == "delta" else obs * block[wet] / hist
+                )
+            result.loc[{"time": idx}] = corrected
+        result.attrs["bias_correction"] = f"QDM-{self.kind}"
+        result.attrs["rank_distribution"] = "modeled_future"
+        return result
+
+    def _transform_weather(self, modeled_future: xr.DataArray) -> xr.DataArray:
+        """
+        Applique le QM historique météo (compatibilité des calibrateurs).
 
         Parameters
         ----------
         modeled_future:
-            Champ à corriger (peut être la même période que ref ou une période future).
+            Émission météo à corriger, sans estimation de distribution future.
 
         Returns
         -------
@@ -244,7 +313,7 @@ class QuantileDeltaMapping:
         if not self._mod_cdf:
             raise RuntimeError("Appeler fit() avant transform().")
 
-        result = modeled_future.copy(deep=True)
+        result = modeled_future.astype(float).copy(deep=True)
         months = list(range(1, 13)) if self.by_month else [0]
 
         for m in months:
@@ -261,7 +330,7 @@ class QuantileDeltaMapping:
             x_mod = self._mod_ppf[m](tau)  # valeur modèle de réf au même quantile
 
             if self.kind == "delta":
-                # Anomalie additive du futur p/r au modèle de réf, préservée (Cannon 2015).
+                # QM dans la plage historique ; biais constant au-delà des bornes.
                 delta = block - x_mod
                 corrected = x_ref + delta
             else:
@@ -273,8 +342,24 @@ class QuantileDeltaMapping:
             result.loc[{"time": idx}] = corrected
 
         result.attrs.update(modeled_future.attrs)
-        result.attrs["bias_correction"] = f"QDM-{self.kind}"
+        result.attrs["bias_correction"] = f"QM-weather-{self.kind}"
         return result
+
+
+class WeatherQuantileMapping(QuantileDeltaMapping):
+    """Operational QM fitted on model/observation pairs from the same period.
+
+    Historical ranks only: no climate delta and no future-window dependency.
+    Retains the previous calibrators' mapping, including constant additive bias
+    (or multiplicative factor) beyond historical bounds, wet-sample fitting and
+    identity for uncalibrated months. ``kind`` describes the tail correction,
+    not climate trend preservation. EQM above instead clamps tails by default.
+    Historical artifact names may still contain 'qdm' for serving compatibility.
+    """
+
+    def transform(self, modeled: xr.DataArray) -> xr.DataArray:
+        """Apply the fixed historical transfer to any operational batch."""
+        return self._transform_weather(modeled)
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 """Fit the AROME-native QDM joblib for serving (voie B, #105 / #70).
 
 Drop-in replacement for the v0 CERRA-calibrated joblib consumed by karpos-engine
-``scripts/apply_qdm_to_arome.py``: same ``QuantileDeltaMapping(kind='delta',
+``scripts/apply_qdm_to_arome.py``: same ``WeatherQuantileMapping(kind='delta',
 by_month=True)`` object, so serving is a joblib swap + ``source_version`` bump to
 ``v1-arome-native``.
 
@@ -11,14 +11,14 @@ pooled pairs (predictor = the operational model itself, not CERRA-lapse; target 
 the assimilated analysis at the station point, which equals the station obs). This
 is the GENERALIZED transfer (pooled over stations) served to ungauged parcels.
 
-Monotonicity note: QDM.transform is monotone, so applying it per-hour and taking
+Monotonicity note: WeatherQuantileMapping.transform is monotone, so applying it per-hour and taking
 the night-min downstream equals applying it to the night-min — consistent with the
 ``/alerts/frost`` and ``parcels-tmin`` endpoints that reduce AROME to a night min.
 
-Measured lift (LOYO x LOSO, 2023-2025, seuil -2.2 C, baseline AROME HD CSI 0.40):
-generalized CSI 0.40->0.46, bias annulé (cf. reports/qdm_arome_native/metrics.json).
+The empirical benchmark in reports/qdm_arome_native/metrics.json uses a
+separate implementation; its scores do not validate this serialized calibrator.
 
-Output: <out>.joblib (QuantileDeltaMapping) + <out>.metadata.json.
+Output: <out>.joblib (WeatherQuantileMapping) + <out>.metadata.json.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from downscaling.karpos_slr.quantile_mapping import QuantileDeltaMapping
+from downscaling.karpos_slr.quantile_mapping import WeatherQuantileMapping
 from downscaling.utils.artifacts import write_artifact_metadata
 
 DEF_SENC = "/Users/loicmaurin/kDrive/karpos_datasets/data/raw/sencrop"
@@ -91,7 +91,7 @@ def main() -> None:
     t = pd.DatetimeIndex(df.night.values)
     modeled = xr.DataArray(df.arome_tmin.values, dims=["time"], coords={"time": t})
     observed = xr.DataArray(df.obs_tmin.values, dims=["time"], coords={"time": t})
-    qdm = QuantileDeltaMapping(kind="delta", n_quantiles=a.n_quantiles, by_month=True).fit(
+    qdm = WeatherQuantileMapping(kind="delta", n_quantiles=a.n_quantiles, by_month=True).fit(
         modeled, observed
     )
 
@@ -111,6 +111,10 @@ def main() -> None:
         sha = None
     meta = {
         "artifact_type": "qdm",
+        "method": "QM-weather",
+        "protocol": "contemporaneous pooled monthly calibration; sanity in-sample",
+        "baseline": "raw AROME-HD night-min at stations",
+        "reference": "Sencrop night-min, train_years",
         "fit_protocol": {
             "kind": qdm.kind,
             "by_month": qdm.by_month,
