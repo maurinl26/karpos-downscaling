@@ -5,7 +5,7 @@ C4.1 (issue maurinl26/karpos-downscaling#32). Fixes the placeholder
 `pipe.calibrate(ref_ds, ref_ds)` in `recalibrate_karpos_slr.py`.
 
 Pools (predicted_lapse_at_station, sencrop_tmin) point pairs across train years
-× stations, fits `QuantileDeltaMapping(kind='delta', by_month=True)` and saves
+× stations, fits `WeatherQuantileMapping(kind='delta', by_month=True)` and saves
 as joblib. The fitted QDM is then loaded by `recalibrate_karpos_slr.py` via
 `--qdm-joblib` and applied **after lapse-rate**, **before** RBF residual.
 
@@ -22,7 +22,7 @@ Inputs
 Output
 ------
 
-    <out>.joblib                 # QuantileDeltaMapping with 12 monthly transfer functions
+    <out>.joblib                 # WeatherQuantileMapping with 12 monthly transfer functions
     <out>.metadata.json          # train years, n_pairs, git SHA, command
 
 Notes
@@ -51,7 +51,7 @@ import pandas as pd
 import xarray as xr
 
 from downscaling.karpos_slr.pipeline import KarposSLRPipeline
-from downscaling.karpos_slr.quantile_mapping import QuantileDeltaMapping
+from downscaling.karpos_slr.quantile_mapping import WeatherQuantileMapping
 from downscaling.prtihvi_wxc.sencrop import load_stations_catalog, load_timeseries
 from downscaling.utils.artifacts import write_artifact_metadata
 
@@ -372,9 +372,9 @@ def main() -> int:
 
     # 5. Fit QDM monthly delta
     log.info(
-        "Fit QuantileDeltaMapping(kind='delta', by_month=True, n_quantiles=%d)…", args.n_quantiles
+        "Fit WeatherQuantileMapping(kind='delta', by_month=True, n_quantiles=%d)…", args.n_quantiles
     )
-    qdm = QuantileDeltaMapping(kind="delta", by_month=True, n_quantiles=args.n_quantiles)
+    qdm = WeatherQuantileMapping(kind="delta", by_month=True, n_quantiles=args.n_quantiles)
     qdm.fit(modeled, observed)
 
     # Sanity check: per-month bias diff + collecte pour W&B
@@ -408,6 +408,10 @@ def main() -> int:
 
     metadata = {
         "artifact_type": "qdm",
+        "method": "QM-weather",
+        "protocol": "contemporaneous pooled monthly calibration; in-sample diagnostics",
+        "baseline": "CERRA lapse-rate at stations",
+        "reference": "Sencrop observations, years and sencrop_root below",
         "fit_protocol": {
             "kind": qdm.kind,
             "by_month": qdm.by_month,

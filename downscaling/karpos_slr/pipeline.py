@@ -5,7 +5,7 @@ Enchaîne :
   1. Chargement ERA5 / CERRA + MNT
   2. Regrillage sur la grille fine (MNT)
   3. Correction lapse-rate (température, pression)
-  4. Correction de biais QDM (température, précipitations, vent)
+  4. Correction de biais QM météo (température, précipitations, vent)
   5. Sauvegarde NetCDF
 
 Piloté par l'entry point Hydra ``downscaling-run`` (cf.
@@ -22,7 +22,7 @@ import xarray as xr
 
 from ..shared.loaders import DEMLoader, regrid_to_dem
 from .lapse_rate import STANDARD_LAPSE_RATE, LapseRateCorrector, correct_surface_pressure
-from .quantile_mapping import EmpiricalQuantileMapping, QuantileDeltaMapping
+from .quantile_mapping import EmpiricalQuantileMapping, WeatherQuantileMapping
 
 log = logging.getLogger(__name__)
 
@@ -37,15 +37,15 @@ class KarposSLRPipeline:
         Chemin vers le MNT haute résolution (GeoTIFF ou NetCDF).
     obs_ref_path:
         Chemin vers le champ de référence basse résolution pour la calibration
-        QDM (CERRA coarse, SAFRAN regrillé…). Optionnel : si absent,
+        QM météo (CERRA coarse, SAFRAN regrillé…). Optionnel : si absent,
         seule la correction lapse-rate est appliquée.
     lapse_rate:
         Gradient thermique (K m⁻¹). Scalaire ou tableau (12,) mensuel.
         Défaut : -6.5e-3 K/m.
     use_qdm:
-        Active la correction QDM (nécessite obs_ref_path).
+        Active la correction QM météo (nécessite obs_ref_path).
     n_quantiles:
-        Nombre de quantiles pour QDM/EQM.
+        Nombre de quantiles pour QM/EQM.
     """
 
     def __init__(
@@ -65,8 +65,8 @@ class KarposSLRPipeline:
         # Chargés lors du premier appel à run()
         self._dem: xr.DataArray | None = None
         self._z_coarse_on_fine: xr.DataArray | None = None
-        self._qdm_t: QuantileDeltaMapping | None = None
-        self._qdm_tp: QuantileDeltaMapping | None = None
+        self._qdm_t: WeatherQuantileMapping | None = None
+        self._qdm_tp: WeatherQuantileMapping | None = None
         self._qdm_wind: EmpiricalQuantileMapping | None = None
 
     # ------------------------------------------------------------------
@@ -113,7 +113,7 @@ class KarposSLRPipeline:
                 t_fine = self._qdm_t.transform(t_fine)
 
             output_vars["t2m"] = t_fine
-            log.info("t2m : lapse-rate + QDM appliqués.")
+            log.info("t2m : lapse-rate + QM météo appliqués.")
 
         # --- Précipitations ---
         if "tp" in variables and "tp" in source:
@@ -124,7 +124,7 @@ class KarposSLRPipeline:
 
             tp_fine = tp_fine.clip(min=0.0)
             output_vars["tp"] = tp_fine
-            log.info("tp : QDM appliqué.")
+            log.info("tp : QM météo appliqué.")
 
         # --- Vent ---
         for comp in ("u10", "v10", "i10fg"):
@@ -142,7 +142,7 @@ class KarposSLRPipeline:
             output_vars["sp"] = sp_fine
 
         ds_out = xr.Dataset(output_vars)
-        ds_out.attrs["downscaling_method"] = "statistical (lapse-rate + QDM)"
+        ds_out.attrs["downscaling_method"] = "statistical (lapse-rate + QM météo)"
         ds_out.attrs["dem_source"] = str(self.dem_loader.dem_path)
         return ds_out
 
@@ -152,7 +152,7 @@ class KarposSLRPipeline:
         observed_ref: xr.Dataset,
     ) -> KarposSLRPipeline:
         """
-        Calibre les correcteurs QDM sur une période de référence.
+        Calibre les correcteurs QM météo sur une période de référence.
 
         Parameters
         ----------
@@ -169,17 +169,17 @@ class KarposSLRPipeline:
         dem = self._get_dem()
 
         if "t2m" in modeled_ref and "t2m" in observed_ref:
-            log.info("Calibration QDM température…")
+            log.info("Calibration QM météo température…")
             t_mod_fine = self._regrid(modeled_ref["t2m"], dem)
             t_obs_fine = self._regrid(observed_ref["t2m"], dem)
-            self._qdm_t = QuantileDeltaMapping(kind="delta", n_quantiles=self.n_quantiles)
+            self._qdm_t = WeatherQuantileMapping(kind="delta", n_quantiles=self.n_quantiles)
             self._qdm_t.fit(t_mod_fine, t_obs_fine)
 
         if "tp" in modeled_ref and "tp" in observed_ref:
-            log.info("Calibration QDM précipitations…")
+            log.info("Calibration QM météo précipitations…")
             tp_mod_fine = self._regrid(modeled_ref["tp"], dem)
             tp_obs_fine = self._regrid(observed_ref["tp"], dem)
-            self._qdm_tp = QuantileDeltaMapping(kind="ratio", n_quantiles=self.n_quantiles)
+            self._qdm_tp = WeatherQuantileMapping(kind="ratio", n_quantiles=self.n_quantiles)
             self._qdm_tp.fit(tp_mod_fine, tp_obs_fine)
 
         for comp in ("u10", "v10"):
