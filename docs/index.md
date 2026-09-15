@@ -48,6 +48,7 @@ user-guide/dl-film-pipeline
 user-guide/prithvi-pipeline
 user-guide/regime-stratification
 user-guide/calibration
+user-guide/counterfactual
 ```
 
 ```{toctree}
